@@ -2,13 +2,17 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+
 #include <iostream>
 #include <stdio.h>
 #include <string.h>
-#include <algorithm>
-#include <limits>
 
-static enum { OFF, READY, SELECTED } mouse; // defaults to OFF
+namespace fs = boost::filesystem;
+
+
+static enum { OFF, READY, SELECTED } mouse; // default OFF
 
 /* *********************************************************************************** */
 void mouseCallback(int event, int x, int y, int flags, void *point)
@@ -80,18 +84,19 @@ private:
 
 };
 
+
+
+
 class Webcam
 {
 public:
 
   /* *********************************************************************************** */
-  explicit Webcam(const std::string& capture_window_name_,
-                  const std::string& stream_window_name_) :
-    capture_window_name(capture_window_name_),
-    stream_window_name(stream_window_name_) {};
+  explicit Webcam(const std::string& window_name_) :
+    window_name(window_name_) {};
 
   /* *********************************************************************************** */
-  ~Webcam() {};
+  ~Webcam() { stream.release(); };
 
   /* *********************************************************************************** */
   bool initialize()
@@ -106,239 +111,248 @@ public:
     w = stream.get(CV_CAP_PROP_FRAME_WIDTH);
     h = stream.get(CV_CAP_PROP_FRAME_HEIGHT);
 
-    cv::namedWindow(stream_window_name, CV_WINDOW_AUTOSIZE);
-    cv::moveWindow(stream_window_name, 0, 0);
+    cv::namedWindow(window_name, CV_WINDOW_NORMAL | CV_WINDOW_KEEPRATIO);//CV_WINDOW_AUTOSIZE);
+    cv::resizeWindow(window_name, 1600, 1200);
+    cv::moveWindow(window_name, 0, 0);
 
-    // Set the mouse callback function
-    cv::setMouseCallback(stream_window_name, mouseCallback, static_cast<void*>(&mouse_click));
+    // Set the mouse callback fn
+    cv::setMouseCallback(window_name, mouseCallback, static_cast<void*>(&mouse_click));
 
-    std::cout << "\n\nStreaming from capture device. Press 'ESC' or 'Space' to capture frame" << std::endl;
     return true;
   }
 
   /* *********************************************************************************** */
-  void pause(const cv::Mat& display, const std::string& name)
+  void pause(const cv::Mat& display)
   {
+
     while(1)
     {
-      cv::imshow(name, display);
-      // Wait 30 ms for keypress
-      unsigned int k = cv::waitKey(30);
-      if (k == 27 || k == 32) // 'ESC' or 'SPACE'
+      cv::imshow(window_name, display);
+      if (cv::waitKey(0))
         break;
     }
   }
 
   /* *********************************************************************************** */
-  void spin(const unsigned int& spin_rate)
+  bool spin(cv::Mat& out)
   {
-    cv::Mat capture_frame;
+    // Spin until user clicks the screen. Capture the image
+    std::cout << "\n\nStreaming from capture device. Press 'ESC' or 'Space' to capture frame" << std::endl;
     while(1)
     {
       cv::Mat frame;
       if (!stream.read(frame))
       {
         std::cerr << "Failed to read frame" << std::endl;
-        return;
+        return false;
       }
 
-      cv::imshow(stream_window_name, frame);
-
-      // Wait 30 ms for keypress
-      unsigned int k = cv::waitKey(spin_rate);
-      if (k == 27 || k == 32) // 'ESC' or 'SPACE'
+      cv::imshow(window_name, frame);
+      if (cv::waitKey(30) != -1)
       {
-        std::cout << "Capturing frame" << std::endl;
-        capture_frame = frame;
+        std::cout << "\nCapturing frame" << std::endl;
+        out = frame;
         break;
       }
     }
-    capture(capture_frame);
+
+    return true;
   }
 
   /* *********************************************************************************** */
-  void capture(const cv::Mat& frame)
+  bool spinWithBlend(const cv::Mat& overlay, cv::Mat& out)
   {
+    // Spin until user clicks the screen. Capture the image
+    std::cout << "\n\nStreaming from capture device. Press 'ESC' or 'Space' to capture frame" << std::endl;
+    while(1)
+    {
+      cv::Mat frame;
+      if (!stream.read(frame))
+      {
+        std::cerr << "Failed to read frame" << std::endl;
+        return false;
+      }
 
-    // Prompt the user for their color so we know what to search for
+      // Alpha blend the two frames together
+      cv::Mat display;
+      cv::addWeighted(overlay, 0.3, frame, 0.7, 0.0, display);
+      cv::imshow(window_name, display);
+
+      if (cv::waitKey(30) != -1)
+      {
+        std::cout << "\nCapturing frame" << std::endl;
+        out = frame;
+        break;
+      }
+
+    }
+
+    return true;
+  }
+
+  /* *********************************************************************************** */
+  void findBlack(const cv::Mat& in,
+                 cv::Mat& out)
+  {
+    Color black;
+    black.setSearchRange(127, 127, 35); // big search range. Makes sure we get all the black
+    black.set(cv::Vec3b(127, 127, 35));
+    out = black.search(in);
+    cv::dilate(out, out, cv::Mat(), cv::Point(-1, -1), 5, 1, 1);
+  }
+
+  void floodFillCenter(const cv::Mat& in,
+                       cv::Mat& out)
+  {
     mouse = READY;
-    std::cout << "\nUsing the mouse, select your marker's color from the image." << std::endl;
+    std::cout << "Please select a pixel on the inside of the course boundary" << std::endl;
 
-
-    cv::Mat thresholded;
-    while (1)
+    // Wait for the user to pick a point.
+    // The mouse callback will save the point as a private member of "this"
+    while(1)
     {
       cv::waitKey(30);
-
-      // Once the user clicks this will activate
       if (mouse == SELECTED)
       {
         mouse = OFF;
-
-        // Convert the image to HSV color space. Easier to lookup specific colors in HSV than BGR
-        cv::Mat frame_hsv = frame.clone();
-        cv::cvtColor(frame, frame_hsv, CV_BGR2HSV);
-
-        // What color was under the mouse?
-        cv::Vec3b c = frame_hsv.at<cv::Vec3b>(mouse_click.y, mouse_click.x);
-        color.set(c);
-
-        // Search the HSV frame for all pixel instances of the specified color
-        color.setSearchRange(5, 50, 50);
-        cv::Mat mask = color.search(frame_hsv);
-
-#if 0
-        // Remove small contours from the image
-        cv::Mat canny;
-        std::vector< std::vector< cv::Point> > contours;
-        std::vector< cv::Vec4i > hierarchy;
-        cv::Canny(mask, canny, 100, 300, 3);
-        cv::findContours(canny, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, cv::Point(0, 0));
-#endif
-
-        // Erode the mask so that we don't miss any pixels
-        mask = cv::Scalar::all(255) - mask;
-        cv::erode(mask, mask, cv::Mat(), cv::Point(-1, -1), 5, 1, 1);
-        mask = cv::Scalar::all(255) - mask;
-
-        // "thresholded" is just a mask. Copy the source image into the mask to show color overlay
-        cv::Mat thresh;
-        frame.copyTo(thresh, mask);
-
-        // Create a new window with their marker color
-        cv::namedWindow(capture_window_name, CV_WINDOW_NORMAL);
-        cv::resizeWindow(capture_window_name, w, h);
-        cv::moveWindow(capture_window_name, 900, 0);
-        cv::setMouseCallback(capture_window_name, mouseCallback, static_cast<void*>(&mouse_click));
-
-        // Show the image to the user
-        cv::imshow(capture_window_name, thresh);
-        cv::waitKey(30);
-
-        // Does the user like the line they made?
-        std::cout << "Is this a good representation of your line? (y/n)" << std::endl;
-
-        std::string choice("");
-        std::getline(std::cin, choice);
-        std::transform(choice.begin(), choice.end(), choice.begin(), ::tolower);
-
-        if (!choice.compare("y") || !choice.compare("yes"))
-        {
-          thresholded = thresh;
-          break;
-        }
-        else if (!choice.compare("n") || !choice.compare("no"))
-        {
-          std::cout << "\nUsing the mouse, select your marker's color from the image." << std::endl;
-          mouse = READY;
-        }
-        else
-        {
-          std::cout << choice.c_str() << " was not an option.\n" << std::endl;
-          std::cout << "\nUsing the mouse, select your marker's color from the image." << std::endl;
-          mouse = READY;
-        }
+        break;
       }
     }
 
-
-#if 0
-    while (mouse != SELECTED)
-    {
-      cv::waitKey(30);
-      // Still need to make sure they didn't pick black or white. Ask them if they want to repick?
-    }
-#endif
-
-    // Find the pixels that lie outside of the boundary
-    cv::Mat outside_mask = fillContours(frame);
-    cv::Mat thresholded_outside;
-    thresholded.copyTo(thresholded_outside, outside_mask(cv::Rect(1, 1, w-2, h-2)));
-
-    pause(outside_mask, capture_window_name);
-
-    finalDisplay(frame, thresholded, thresholded_outside);
-  }
-
-  /* *********************************************************************************** */
-  cv::Mat fillContours(const cv::Mat& frame)
-  {
-    Color black;
-    black.setSearchRange(127, 127, 40); // big search range. Makes sure we get all the black
-    black.set(cv::Vec3b(127, 127, 15));
-    cv::Mat stencil_mask = black.search(frame);
-
-    cv::imshow(capture_window_name, stencil_mask);
-
-    // Prompt the user to click a point on the inside of the object
-    mouse = READY;
-    std::cout << "\nUsing the mouse, click somewhere inside the boundary." << std::endl;
-
-    while (mouse != SELECTED)
-    {
-      cv::waitKey(30);
-      // Still need to make sure they didn't pick black or white. Ask them if they want to repick?
-    }
-
-    // The stencil_mask is now a binary image with 1 where black, and 0 elsewhere
-    cv::Mat filled;
-
     // Make an output image padded with 1 extra pixel on all edges
-    cv::copyMakeBorder(stencil_mask,
-                       filled,
+    cv::copyMakeBorder(in,
+                       out,
                        1, 1, 1, 1,
                        cv::BORDER_REPLICATE);
 
     // Fill everything on the inside of the black line with 128 intensity
     // Arguments are selected based on assumption that stencil_mask is binary
-    cv::floodFill(stencil_mask, // input image
-                  filled, // output
+    //cv::Point seed(static_cast<int>(w/2), static_cast<int>(h/2));
+    cv::floodFill(in, // input image
+                  out, // output
                   mouse_click, // seed point for filling
                   cv::Scalar(255), // ???
                   0,
                   cv::Scalar(), // maximum lower brightness difference for filling (all 0)
                   cv::Scalar(), // maximum upper brightness difference for filling (all 0)
-                  4 | (128 << 8)); // color of filled output
+                  4 | (100 << 8)); // color of filled output
 
-    // Create a new binary mask for the inside of the course
-    cv::Mat outside_mask, outside_dilated;
-    cv::inRange(filled, cv::Scalar(128, 128, 128), cv::Scalar(128, 128, 128), outside_mask);
-    outside_mask = cv::Scalar::all(255) - outside_mask;
-
-    // Erode the mask; we need to grow it to the edges of the thick black lines
-    cv::erode(outside_mask, outside_dilated, cv::Mat(), cv::Point(-1, -1), 10, 1, 1);
-
-    return outside_dilated;
+    // Shave off a 1 pixel thick border from copying operations
+    out = out(cv::Rect(1, 1, w-2, h-2));
   }
 
   /* *********************************************************************************** */
-  void finalDisplay(const cv::Mat& frame,
-                    const cv::Mat& thresholded,
-                    const cv::Mat& thresholded_outside)
+  void floodFillOutside(const cv::Mat& in,
+                        cv::Mat& out)
   {
-    cv::Mat final = frame;
+    mouse = READY;
+    std::cout << "Please select a pixel on the outside of the course boundary" << std::endl;
 
-    // Find all values of the user's color, paint them green.
-    // Then find all values of the user's color that lie
-    // outside of the mask. Paint those red.
-    // The red will overwrite some of the green.
-    // Display the user's screenshot with green and red painted on top
+    // Wait for the user to pick a point.
+    // The mouse callback will save the point as a private member of "this"
+    while(1)
+    {
+      cv::waitKey(30);
+      if (mouse == SELECTED)
+      {
+        mouse = OFF;
+        break;
+      }
+    }
 
-    // Make the masks binary
-    cv::Mat thresholded_bin = thresholded > 0;
-    cv::Mat thresholded_outside_bin = thresholded_outside > 0;
+    // Make an output image padded with 1 extra pixel on all edges
+    cv::copyMakeBorder(in,
+                       out,
+                       1, 1, 1, 1,
+                       cv::BORDER_REPLICATE);
 
-    cv::Mat green(final.size(), CV_8UC3, cv::Scalar(0, 255, 0));
-    green.copyTo(final, thresholded_bin);
+    // Fill everything on the inside of the black line with 128 intensity
+    // Arguments are selected based on assumption that stencil_mask is binary
+    //cv::Point seed(static_cast<int>(w/8), static_cast<int>(h/8));
+    cv::floodFill(in, // input image
+                  out, // output
+                  mouse_click, // seed point for filling
+                  cv::Scalar(255), // ???
+                  0,
+                  cv::Scalar(), // maximum lower brightness difference for filling (all 0)
+                  cv::Scalar(), // maximum upper brightness difference for filling (all 0)
+                  4 | (200 << 8)); // color of filled output
 
-    cv::Mat red(final.size(), CV_8UC3, cv::Scalar(0, 0, 255));
-    red.copyTo(final, thresholded_outside_bin);
+    // Shave off a 1 pixel thick border from copying operations
+    out = out(cv::Rect(1, 1, w-2, h-2));
 
-    pause(final, capture_window_name);
-
-    // Prompt user to close window
   }
 
+  /* *********************************************************************************** */
+  void makeOverlay(const cv::Mat& in,
+                   cv::Mat& out)
+  {
+    // Find all stuff inside and on the border, make it blue with a 0.5 alpha value
+    // for alignment when calling ./scoring.o use_template
+    cv::Mat middle;
+    cv::inRange(in, cv::Scalar(100), cv::Scalar(100), middle);
+
+    cv::Mat border;
+    cv::inRange(in, cv::Scalar(255), cv::Scalar(255), border);
+
+    // Return the union of the two masks
+    cv::Mat mask(h, w, CV_8UC3);
+    cv::bitwise_or(middle, border, mask);
+    cv::copyMakeBorder(mask,
+                       mask,
+                       1, 1, 1, 1,
+                       cv::BORDER_REPLICATE);
+
+
+    // Make a teal overlay with an alpha channel
+    cv::Mat overlay(h, w, CV_8UC4);
+    overlay.setTo(cv::Scalar(255, 255, 0, 0.5));
+
+    out.create(h, w, CV_8UC4);
+    overlay.copyTo(out, mask);
+  }
+
+  /* *********************************************************************************** */
+  void getInside(const cv::Mat& capture,
+                 const cv::Mat& mask,
+                 cv::Mat& out)
+  {
+    // Get the user's black lines on the inside of the black border
+    cv::Mat inside_mask;
+    cv::inRange(mask, cv::Scalar(100), cv::Scalar(100), inside_mask);
+    cv::copyMakeBorder(inside_mask, inside_mask, 1, 1, 1, 1, cv::BORDER_REPLICATE);
+
+    out.create(cv::Size(w, h), CV_8UC3);
+    out.setTo(cv::Scalar(255, 255, 255));
+    capture.copyTo(out, inside_mask);
+  }
+
+  /* *********************************************************************************** */
+  void getOutside(const cv::Mat& capture,
+                  const cv::Mat& mask,
+                  cv::Mat& out)
+  {
+    // Get the user's black lines on the outside of the black border
+    cv::Mat outside_mask;
+    cv::inRange(mask, cv::Scalar(200), cv::Scalar(200), outside_mask);
+    cv::copyMakeBorder(outside_mask, outside_mask, 1, 1, 1, 1, cv::BORDER_REPLICATE);
+
+    out.create(cv::Size(w, h), CV_8UC3);
+    out.setTo(cv::Scalar(255, 255, 255));
+    capture.copyTo(out, outside_mask);
+  }
+
+  /* *********************************************************************************** */
+  unsigned int countLinePixels(const cv::Mat& capture,
+                               cv::Mat& out)
+  {
+    Color black;
+    black.setSearchRange(127, 127, 35); // big search range. Makes sure we get all the black
+    black.set(cv::Vec3b(127, 127, 35));
+
+    out = black.search(capture);
+    return cv::countNonZero( out );
+  }
 
 private:
 
@@ -346,24 +360,170 @@ private:
   cv::Point mouse_click;
 
   unsigned int w, h;
-  std::string capture_window_name;
-  std::string stream_window_name;
-
-  Color color;
+  std::string window_name;
 };
+
+
+
+
+
+/* *********************************************************************************** */
+void usage()
+{
+  std::cerr << "\nUsage:\n"
+  << "./score.o set_template TEMPLATE_NAME\n"
+  << "./score.o use_template TEMPLATE_NAME\n"
+  << std::endl;
+}
+
+/* *********************************************************************************** */
+std::string templateFilename(const fs::path& path,
+                             const std::string& fname)
+{
+  // Get full path to this binary
+  fs::path full_path(fs::initial_path<fs::path>());
+  full_path = fs::system_complete( path );
+  std::string out = full_path.parent_path().string();
+
+  // Add the filename and extension and return it
+  return out.append("/"+fname);
+}
+
+void printScore(const unsigned int& inside_pix,
+                const unsigned int& outside_pix,
+                const unsigned int& area_inside)
+{
+  std::cout.unsetf( std::ios::floatfield );
+  std::cout.precision(5);
+
+  std::cout
+  << "Number of pixels colored inside the border: "
+  << inside_pix
+  << " / "
+  << area_inside
+  << " ("
+  << static_cast<double>(inside_pix) / static_cast<double>(area_inside)
+  << " %)"
+  << std::endl;
+
+  std::cout << "Number of pixels colored outside the border: " << outside_pix << std::endl;
+  std::cout << "Number of pixels inside of the border: " << area_inside << std::endl;
+
+  std::cout << "\nTotal score: " << (inside_pix - 2.*outside_pix) / area_inside << std::endl;
+}
+
 
 int main(int argc, char** argv)
 {
-  Webcam wc("Captured Image", "IC Robotics Competition Scoring");
 
-  if(!wc.initialize())
+  if (argc != 3)
   {
-    std::cerr << "Failed to initialize webcam" << std::endl;
+    usage();
     return -1;
   }
 
-  // 30 ms per frame
-  wc.spin(30);
+  // If the user chose to set the template, create one
+  if (std::string(argv[1]).compare("set_template") == 0 && argc == 3)
+  {
+    Webcam wc("IC Robotics Competition: Set Template");
 
+    if(!wc.initialize())
+    {
+      std::cerr << "Failed to initialize webcam" << std::endl;
+      return 0;
+    }
+
+    // Prompt the user to capture a frame for the template
+    cv::Mat capture;
+    if(!wc.spin(capture))
+    {
+      std::cerr << "Failed to capture frame" << std::endl;
+      return 0;
+    }
+
+    // Find black regions
+    cv::Mat border, mask1, mask2, overlay;
+    wc.findBlack(capture, border);
+    cv::imshow("find black regions", border); cv::waitKey(0);
+
+    // Flood fill inside black border
+    wc.floodFillCenter(border, mask1); // values inside are 100
+    cv::imshow("flood fill center", border); cv::waitKey(0);
+
+    // Flood fill outside black border
+    wc.floodFillOutside(mask1, mask2); // values outside are 200
+    cv::imshow("flood fill outside", border); cv::waitKey(0);
+
+    // Build the overlay for alignment in ./scoring.o use_template
+    wc.makeOverlay(mask2, overlay);
+    cv::imshow("overlay", overlay); cv::waitKey(0);
+
+    // Save the template and overlay
+    std::string out_name = templateFilename( fs::path( argv[0] ), std::string( argv[2] ) );
+    cv::imwrite(out_name + std::string(".bmp"), mask2 );
+    cv::imwrite(out_name + std::string("_overlay.bmp"), overlay );
+
+    return -1;
+  }
+
+  // Otherwise, the user should have chosen to use a template
+  if (std::string(argv[1]).compare("use_template") == 0 && argc == 3)
+  {
+    // Load the template
+    std::string in_name = templateFilename( fs::path( argv[0] ), std::string( argv[2] ) );
+    cv::Mat mask = cv::imread( in_name + std::string(".bmp"), CV_LOAD_IMAGE_GRAYSCALE );
+    cv::Mat overlay = cv::imread( in_name + std::string("_overlay.bmp"),
+                                CV_LOAD_IMAGE_COLOR);
+
+    // Open the webcam
+    Webcam wc("IC Robotics Competition: Score Drawing");
+
+    if(!wc.initialize())
+    {
+     std::cerr << "Failed to initialize webcam" << std::endl;
+     return 0;
+    }
+
+    // Prompt the user to capture a frame after aligning under the overlay
+    cv::Mat capture;
+    if(!wc.spinWithBlend(overlay, capture))
+    {
+      std::cerr << "Failed to capture frame" << std::endl;
+      return 0;
+    }
+
+    // Get the user's black lines on the inside of the black border
+    cv::Mat inside_masked;
+    wc.getInside(capture, mask, inside_masked);
+
+    // Get the user's black lines on the outside of the black border
+    cv::Mat outside_masked;
+    wc.getOutside(capture, mask, outside_masked);
+
+    cv::Mat highlight_green, highlight_red;
+    unsigned int inside_pix = wc.countLinePixels(inside_masked, highlight_green);
+    unsigned int outside_pix = wc.countLinePixels(outside_masked, highlight_red);
+
+    cv::Mat count_area_inside, garbage;
+    cv::inRange(mask, cv::Scalar(100), cv::Scalar(100), count_area_inside);
+    unsigned int area_inside = wc.countLinePixels(count_area_inside, garbage);
+
+    // Print the user's score
+    printScore(inside_pix, outside_pix, area_inside);
+
+    cv::Mat green(capture.size(), CV_8UC3, cv::Scalar(0, 255, 0));
+    green.copyTo(capture, highlight_green);
+
+    cv::Mat red(capture.size(), CV_8UC3, cv::Scalar(0, 0, 255));
+    red.copyTo(capture, highlight_red);
+
+    cv::imshow("final", capture);
+    cv::waitKey(0);
+
+    return -1;
+  }
+
+  usage();
   return 0;
+
 }
