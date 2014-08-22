@@ -4,8 +4,10 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/lexical_cast.hpp>
 
 #include <iostream>
+#include <iomanip>
 #include <stdio.h>
 #include <string.h>
 
@@ -137,9 +139,10 @@ public:
   bool spin(cv::Mat& out)
   {
     // Spin until user clicks the screen. Capture the image
-    std::cout << "\n\nStreaming from capture device. Press 'ESC' or 'Space' to capture frame" << std::endl;
+    std::cout << "\n\nStreaming from capture device. Press any key to capture frame" << std::endl;
     while(1)
     {
+
       cv::Mat frame;
       if (!stream.read(frame))
       {
@@ -147,13 +150,19 @@ public:
         return false;
       }
 
-      cv::imshow(window_name, frame);
       if (cv::waitKey(30) != -1)
       {
         std::cout << "\nCapturing frame" << std::endl;
         out = frame;
         break;
       }
+
+      // Make a dummy to put text on and disply to the user
+      cv::Mat display = frame;
+      cv::putText(display, "Press any key to capture a frame", cv::Point(30, 15),
+                  cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+      cv::imshow(window_name, display);
+
     }
 
     return true;
@@ -173,17 +182,25 @@ public:
         return false;
       }
 
-      // Alpha blend the two frames together
-      cv::Mat display;
-      cv::addWeighted(overlay, 0.3, frame, 0.7, 0.0, display);
-      cv::imshow(window_name, display);
-
       if (cv::waitKey(30) != -1)
       {
         std::cout << "\nCapturing frame" << std::endl;
         out = frame;
         break;
       }
+
+      // Alpha blend the two frames together
+      cv::Mat display;
+      cv::addWeighted(overlay, 0.3, frame, 0.7, 0.0, display);
+
+      // Add text
+      cv::putText(display, "Align your image with the mask", cv::Point(30, 15),
+                  cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+
+      cv::putText(display, "Press any key to capture a frame", cv::Point(30, 40),
+                  cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+
+      cv::imshow(window_name, display);
 
     }
 
@@ -227,7 +244,6 @@ public:
 
     // Fill everything on the inside of the black line with 128 intensity
     // Arguments are selected based on assumption that stencil_mask is binary
-    //cv::Point seed(static_cast<int>(w/2), static_cast<int>(h/2));
     cv::floodFill(in, // input image
                   out, // output
                   mouse_click, // seed point for filling
@@ -245,42 +261,16 @@ public:
   void floodFillOutside(const cv::Mat& in,
                         cv::Mat& out)
   {
-    mouse = READY;
-    std::cout << "Please select a pixel on the outside of the course boundary" << std::endl;
+    // Everything that is not inside or border is outside
 
-    // Wait for the user to pick a point.
-    // The mouse callback will save the point as a private member of "this"
-    while(1)
-    {
-      cv::waitKey(30);
-      if (mouse == SELECTED)
-      {
-        mouse = OFF;
-        break;
-      }
-    }
+    // Find all regions that are not inside or on the border
+    cv::Mat mask = in == 0;
+    cv::copyMakeBorder(mask, mask, 1, 1, 1, 1, cv::BORDER_REPLICATE);
 
-    // Make an output image padded with 1 extra pixel on all edges
-    cv::copyMakeBorder(in,
-                       out,
-                       1, 1, 1, 1,
-                       cv::BORDER_REPLICATE);
-
-    // Fill everything on the inside of the black line with 128 intensity
-    // Arguments are selected based on assumption that stencil_mask is binary
-    //cv::Point seed(static_cast<int>(w/8), static_cast<int>(h/8));
-    cv::floodFill(in, // input image
-                  out, // output
-                  mouse_click, // seed point for filling
-                  cv::Scalar(255), // ???
-                  0,
-                  cv::Scalar(), // maximum lower brightness difference for filling (all 0)
-                  cv::Scalar(), // maximum upper brightness difference for filling (all 0)
-                  4 | (200 << 8)); // color of filled output
-
-    // Shave off a 1 pixel thick border from copying operations
-    out = out(cv::Rect(1, 1, w-2, h-2));
-
+    // Copy a new mat with 200s into the mask
+    cv::Mat outside(in.size(), CV_8U, cv::Scalar(200));
+    out = in;
+    outside.copyTo(out, mask);
   }
 
   /* *********************************************************************************** */
@@ -310,6 +300,12 @@ public:
 
     out.create(h, w, CV_8UC4);
     overlay.copyTo(out, mask);
+  }
+
+  /* *********************************************************************************** */
+  void showTemplate(const cv::Mat& display)
+  {
+    pause(display);
   }
 
   /* *********************************************************************************** */
@@ -347,11 +343,54 @@ public:
                                cv::Mat& out)
   {
     Color black;
-    black.setSearchRange(127, 127, 35); // big search range. Makes sure we get all the black
+    black.setSearchRange(127, 127, 70); // big search range. Makes sure we get all the black
     black.set(cv::Vec3b(127, 127, 35));
 
     out = black.search(capture);
     return cv::countNonZero( out );
+  }
+
+  void showFinal(const cv::Mat& highlight_green,
+                 const cv::Mat& highlight_red,
+                 const unsigned int& inside_pix,
+                 const unsigned int& outside_pix,
+                 const unsigned int& area_inside,
+                 cv::Mat& final_display)
+  {
+    cv::Mat green(final_display.size(), CV_8UC3, cv::Scalar(0, 255, 0));
+    green.copyTo(final_display, highlight_green);
+
+    cv::Mat red(final_display.size(), CV_8UC3, cv::Scalar(0, 0, 255));
+    red.copyTo(final_display, highlight_red);
+
+    // Add the user's score to the final display
+    std::ostringstream inside_ss, outside_ss, score_ss;
+
+    inside_ss
+    << "Number of pixels inside the border: "
+    << inside_pix
+    << " (" <<  std::setprecision(5)
+    << static_cast<double>(inside_pix) / static_cast<double>(area_inside)
+    << " %)";
+
+    outside_ss
+    << "Number of pixels outside the border: "
+    << outside_pix;
+
+    score_ss
+    << "Final score: "
+    << (double(inside_pix) - 2.*outside_pix) / area_inside;
+
+    cv::putText(final_display, inside_ss.str(), cv::Point(30, 15),
+                cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+
+    cv::putText(final_display, outside_ss.str(), cv::Point(30, 40),
+                cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+
+    cv::putText(final_display, score_ss.str(), cv::Point(30, 65),
+                cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
+
+    pause(final_display);
   }
 
 private:
@@ -389,6 +428,7 @@ std::string templateFilename(const fs::path& path,
   return out.append("/"+fname);
 }
 
+/* *********************************************************************************** */
 void printScore(const unsigned int& inside_pix,
                 const unsigned int& outside_pix,
                 const unsigned int& area_inside)
@@ -407,12 +447,12 @@ void printScore(const unsigned int& inside_pix,
   << std::endl;
 
   std::cout << "Number of pixels colored outside the border: " << outside_pix << std::endl;
-  std::cout << "Number of pixels inside of the border: " << area_inside << std::endl;
 
   std::cout << "\nTotal score: " << (inside_pix - 2.*outside_pix) / area_inside << std::endl;
 }
 
 
+/* *********************************************************************************** */
 int main(int argc, char** argv)
 {
 
@@ -444,24 +484,22 @@ int main(int argc, char** argv)
     // Find black regions
     cv::Mat border, mask1, mask2, overlay;
     wc.findBlack(capture, border);
-    cv::imshow("find black regions", border); cv::waitKey(0);
 
     // Flood fill inside black border
     wc.floodFillCenter(border, mask1); // values inside are 100
-    cv::imshow("flood fill center", border); cv::waitKey(0);
 
     // Flood fill outside black border
     wc.floodFillOutside(mask1, mask2); // values outside are 200
-    cv::imshow("flood fill outside", border); cv::waitKey(0);
 
     // Build the overlay for alignment in ./scoring.o use_template
     wc.makeOverlay(mask2, overlay);
-    cv::imshow("overlay", overlay); cv::waitKey(0);
 
     // Save the template and overlay
     std::string out_name = templateFilename( fs::path( argv[0] ), std::string( argv[2] ) );
     cv::imwrite(out_name + std::string(".bmp"), mask2 );
     cv::imwrite(out_name + std::string("_overlay.bmp"), overlay );
+
+    wc.showTemplate(mask2);
 
     return -1;
   }
@@ -511,14 +549,10 @@ int main(int argc, char** argv)
     // Print the user's score
     printScore(inside_pix, outside_pix, area_inside);
 
-    cv::Mat green(capture.size(), CV_8UC3, cv::Scalar(0, 255, 0));
-    green.copyTo(capture, highlight_green);
 
-    cv::Mat red(capture.size(), CV_8UC3, cv::Scalar(0, 0, 255));
-    red.copyTo(capture, highlight_red);
-
-    cv::imshow("final", capture);
-    cv::waitKey(0);
+    wc.showFinal(highlight_green, highlight_red,
+                 inside_pix, outside_pix,
+                 area_inside, capture);
 
     return -1;
   }
