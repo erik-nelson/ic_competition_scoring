@@ -103,7 +103,7 @@ public:
   /* *********************************************************************************** */
   bool initialize()
   {
-    stream = cv::VideoCapture(1);
+    stream = cv::VideoCapture(0);
 
     if (!stream.isOpened())
     {
@@ -355,7 +355,8 @@ public:
                  const unsigned int& inside_pix,
                  const unsigned int& outside_pix,
                  const unsigned int& area_inside,
-                 cv::Mat& final_display)
+                 cv::Mat& final_display,
+                 bool bonus = false)
   {
     cv::Mat green(final_display.size(), CV_8UC3, cv::Scalar(0, 255, 0));
     green.copyTo(final_display, highlight_green);
@@ -377,9 +378,14 @@ public:
     << "Number of pixels outside the border: "
     << outside_pix;
 
-    score_ss
-    << "Final score: "
-    << (double(inside_pix) - 2.*outside_pix) / area_inside;
+    if (bonus)
+      score_ss
+      << "Final score: "
+      << (1.5*double(inside_pix) - 2.*outside_pix) / area_inside;
+    else
+      score_ss
+      << "Final score: "
+      << (double(inside_pix) - 2.*outside_pix) / area_inside;
 
     cv::putText(final_display, inside_ss.str(), cv::Point(30, 15),
                 cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(200, 0, 0), 0, CV_AA);
@@ -431,7 +437,8 @@ std::string templateFilename(const fs::path& path,
 /* *********************************************************************************** */
 void printScore(const unsigned int& inside_pix,
                 const unsigned int& outside_pix,
-                const unsigned int& area_inside)
+                const unsigned int& area_inside,
+                bool bonus = false)
 {
   std::cout.unsetf( std::ios::floatfield );
   std::cout.precision(5);
@@ -448,7 +455,10 @@ void printScore(const unsigned int& inside_pix,
 
   std::cout << "Number of pixels colored outside the border: " << outside_pix << std::endl;
 
-  std::cout << "\nTotal score: " << (inside_pix - 2.*outside_pix) / area_inside << std::endl;
+  if (bonus)
+    std::cout << "\nTotal score: " << (inside_pix - 2.*outside_pix) / area_inside << std::endl;
+  else
+    std::cout << "\nTotal score: " << (1.5*inside_pix - 2.*outside_pix) / area_inside << std::endl;
 }
 
 
@@ -456,7 +466,7 @@ void printScore(const unsigned int& inside_pix,
 int main(int argc, char** argv)
 {
 
-  if (argc != 3)
+  if (argc < 3 || argc > 4)
   {
     usage();
     return -1;
@@ -505,7 +515,7 @@ int main(int argc, char** argv)
   }
 
   // Otherwise, the user should have chosen to use a template
-  if (std::string(argv[1]).compare("use_template") == 0 && argc == 3)
+  if (std::string(argv[1]).compare("use_template") == 0 && (argc == 3 || argc == 4))
   {
     // Load the template
     std::string in_name = templateFilename( fs::path( argv[0] ), std::string( argv[2] ) );
@@ -547,12 +557,24 @@ int main(int argc, char** argv)
     unsigned int area_inside = wc.countLinePixels(count_area_inside, garbage);
 
     // Print the user's score
-    printScore(inside_pix, outside_pix, area_inside);
+    if (argv[3])
+    {
+      printScore(inside_pix, outside_pix, area_inside, true);
+      wc.showFinal(highlight_green, highlight_red,
+                   inside_pix, outside_pix,
+                   area_inside, capture,
+                   true);
+    }
+    else
+    {
+      printScore(inside_pix, outside_pix, area_inside);
+      wc.showFinal(highlight_green, highlight_red,
+                   inside_pix, outside_pix,
+                   area_inside, capture);
+    }
 
 
-    wc.showFinal(highlight_green, highlight_red,
-                 inside_pix, outside_pix,
-                 area_inside, capture);
+
 
     return -1;
   }
